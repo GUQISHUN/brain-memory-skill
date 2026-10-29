@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>立体记忆查看器</title>
+<style>
+:root{--bg:#fafaf7;--fg:#1d1d1b;--mut:#6b6b66;--card:#fff;--line:#d9d8d2;--ep:#e8743b;--se:#3b82f6;--pr:#22a06b;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161615;--fg:#ecebe6;--mut:#9a9992;--card:#212120;--line:#3a3a37}}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+body{display:flex;flex-direction:column}
+header{padding:8px 12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-bottom:1px solid var(--line)}
+h1{font-size:16px;margin:0 6px 0 0}
+.b,select,input[type=search]{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:4px 10px;font:inherit}
+.b{cursor:pointer}.b.off{opacity:.4}
+.k i{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:4px}
+#wrap{position:relative;flex:1;min-height:0}
+canvas{width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+#empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;color:var(--mut);padding:20px}
+#panel{position:absolute;right:10px;top:10px;width:300px;max-height:calc(100% - 20px);overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;display:none}
+#panel h2{font-size:15px;margin:0 0 6px;word-break:break-word}
+#panel dl{margin:8px 0;display:grid;grid-template-columns:auto 1fr;gap:2px 10px}
+#panel dt{color:var(--mut)}#panel dd{margin:0}
+#panel .nb{display:block;width:100%;text-align:left;margin-top:4px}
+#x{float:right}
+#hint{position:absolute;left:12px;bottom:8px;color:var(--mut);font-size:12px;pointer-events:none;max-width:60%}
+@media (max-width:600px){#panel{left:10px;right:10px;top:auto;bottom:10px;width:auto;max-height:50%}#hint{display:none}}
+</style>
+</head>
+<body>
+<header>
+<h1>立体记忆查看器</h1>
+<label class="b">载入文件<input id="file" type="file" accept=".json" hidden></label>
+<input id="q" type="search" placeholder="搜索内容、标签、主题" size="14">
+<select id="topic"><option value="">全部主题</option></select>
+<span id="kinds"></span>
+<button class="b" id="zin">＋</button><button class="b" id="zout">－</button>
+</header>
+<div id="wrap"><canvas id="c"></canvas>
+<div id="empty">请载入 <code>brain map</code> 导出的 map.json，或直接载入 brain_memory.json。<br>文件只在你的浏览器里读取，不会上传。</div>
+<div id="panel"></div><div id="hint">拖动旋转，滚轮或＋－缩放，点击记忆查看详情。大小表示重要度，透明度表示保留率，红圈为负面情绪，金圈为正面情绪，外环表示长期或置顶。</div></div>
+<script>
+var DATA=null,sel=null,yaw=0.6,pitch=0.35,zoom=1,pts=[],W=0,H=0,vis={episodic:1,semantic:1,procedural:1};
+var cv=document.getElementById("c"),ctx=cv.getContext("2d"),panel=document.getElementById("panel");
+var COL={episodic:"#e8743b",semantic:"#3b82f6",procedural:"#22a06b"},KN={episodic:"事件",semantic:"语义",procedural:"程序"},KY={episodic:-1,semantic:0,procedural:1};
+var GAPS=6;
+function css(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()}
+function fromRaw(raw){
+var ms=Object.keys(raw.memories).map(function(k){return raw.memories[k]}),topics=[],now=Date.now()/1000;
+ms.forEach(function(m){m.topic=m.topic||(m.tags&&m.tags[0])||"general";if(topics.indexOf(m.topic)<0)topics.push(m.topic)});
+topics.sort();
+var cs=ms.map(function(m){return m.created}),t0=Math.min.apply(null,cs),t1=Math.max.apply(null,cs),edges=[];
+for(var k in (raw.edges||{})){var p=k.split("|");edges.push({a:p[0],b:p[1],w:raw.edges[k]})}
+return{topics:topics,edges:edges,nodes:ms.map(function(m){
+var kind=m.kind||"semantic",ret=m.pinned?1:Math.exp(-Math.max(0,now-m.last_access)/86400/m.stability);
+return{id:m.id,text:m.text,kind:kind,topic:m.topic,importance:m.importance,valence:m.valence||0,stage:m.stage,pinned:!!m.pinned,retention:Math.round(ret*1000)/1000,tags:m.tags||[],created:m.created,last_access:m.last_access,next_review:(m.stage==="long"||m.pinned)?null:(m.next_review||null),review_step:m.review_step||0,review_total:GAPS,recalls:m.recalls||0,x:t1===t0?0:(m.created-t0)/(t1-t0)*2-1,y:KY[kind],z:topics.length<2?0:topics.indexOf(m.topic)/(topics.length-1)*2-1}})}}
+function setData(d){
+DATA=d;sel=null;panel.style.display="none";document.getElementById("empty").style.display="none";
+var s=document.getElementById("topic");s.length=1;d.topics.forEach(function(t){var o=document.createElement("option");o.value=t;o.textContent=t;s.appendChild(o)});
+draw()}
+function resize(){var r=cv.getBoundingClientRect(),d=window.devicePixelRatio||1;W=r.width;H=r.height;cv.width=W*d;cv.height=H*d;ctx.setTransform(d,0,0,d,0,0);draw()}
+function proj(x,y,z){
+var cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);
+var x1=x*cy-z*sy,z1=x*sy+z*cy,y1=y*cp-z1*sp,z2=y*sp+z1*cp,s=Math.min(W,H)*0.3*zoom,f=1/(1-z2*0.25);
+return{x:W/2+x1*s*f,y:H/2-y1*s*f,d:z2,f:f}}
+function seg(a,b,col,w,al){var p=proj(a[0],a[1],a[2]),q=proj(b[0],b[1],b[2]);ctx.globalAlpha=al;ctx.strokeStyle=col;ctx.lineWidth=w;ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(q.x,q.y);ctx.stroke();ctx.globalAlpha=1}
+function lab(t,p,col){var q=proj(p[0],p[1],p[2]);ctx.fillStyle=col;ctx.font="12px system-ui,sans-serif";ctx.fillText(t,q.x+4,q.y-4)}
+function match(n){
+var q=document.getElementById("q").value.trim().toLowerCase(),tp=document.getElementById("topic").value;
+if(tp&&n.topic!==tp)return false;
+return !q||(n.text+" "+n.topic+" "+n.tags.join(" ")).toLowerCase().indexOf(q)>=0}
+function draw(){
+if(!DATA)return;
+var mut=css("--mut"),ln=css("--line"),fg=css("--fg");
+ctx.clearRect(0,0,W,H);
+seg([-1,-1,-1],[1,-1,-1],mut,1,.8);seg([-1,-1,-1],[-1,1,-1],mut,1,.8);seg([-1,-1,-1],[-1,-1,1],mut,1,.8);
+lab("时间 →",[1,-1,-1],mut);lab("类型 ↑",[-1,1,-1],mut);lab("主题 →",[-1,-1,1],mut);
+[-1,0,1].forEach(function(k){var nm=k<0?"事件":k>0?"程序":"语义";lab(nm,[-1,k,-1],mut);seg([-1,k,-1],[1,k,-1],ln,1,.5)});
+DATA.topics.forEach(function(t,i){var n=DATA.topics.length;lab(t,[-1,-1,n<2?0:i/(n-1)*2-1],mut)});
+var by={};pts=[];
+DATA.nodes.forEach(function(n){if(!vis[n.kind])return;var p=proj(n.x,n.y*0.8,n.z);p.n=n;p.ok=match(n);by[n.id]=p;pts.push(p)});
+DATA.edges.forEach(function(e){var a=by[e.a],b=by[e.b];if(!a||!b)return;var hot=sel&&(e.a===sel||e.b===sel);
+ctx.globalAlpha=hot?.9:(a.ok&&b.ok?0.15+0.4*e.w:0.05);ctx.strokeStyle=hot?fg:mut;ctx.lineWidth=hot?2:0.5+2*e.w;ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();ctx.globalAlpha=1});
+pts.sort(function(a,b){return a.d-b.d});
+pts.forEach(function(p){var n=p.n,r=(4+10*n.importance)*p.f*Math.min(1.4,zoom);p.r=r;
+ctx.globalAlpha=p.ok?0.25+0.75*n.retention:0.08;ctx.fillStyle=COL[n.kind]||"#888";ctx.beginPath();ctx.arc(p.x,p.y,r,0,7);ctx.fill();ctx.globalAlpha=p.ok?1:0.2;
+if(n.valence!==0){ctx.strokeStyle=n.valence<0?"#d64545":"#d9a400";ctx.lineWidth=2;ctx.beginPath();ctx.arc(p.x,p.y,r+2,0,7);ctx.stroke()}
+if(n.stage==="long"||n.pinned){ctx.strokeStyle=fg;ctx.lineWidth=1;ctx.beginPath();ctx.arc(p.x,p.y,r+5,0,7);ctx.stroke()}
+if(n.id===sel){ctx.globalAlpha=1;ctx.strokeStyle=fg;ctx.lineWidth=3;ctx.beginPath();ctx.arc(p.x,p.y,r+8,0,7);ctx.stroke()}
+ctx.globalAlpha=1})}
+function fd(t){return t?new Date(t*1000).toLocaleString():"无"}
+function row(dl,k,v){var a=document.createElement("dt"),b=document.createElement("dd");a.textContent=k;b.textContent=v;dl.appendChild(a);dl.appendChild(b)}
+function show(id){
+sel=id;var n=DATA.nodes.filter(function(x){return x.id===id})[0];
+panel.textContent="";
+if(!n){panel.style.display="none";draw();return}
+var x=document.createElement("button");x.className="b";x.id="x";x.textContent="关闭";x.onclick=function(){sel=null;panel.style.display="none";draw()};
+var h=document.createElement("h2");h.textContent=n.text;panel.appendChild(x);panel.appendChild(h);
+var dl=document.createElement("dl");
+row(dl,"编号",n.id);row(dl,"类型 / 主题",KN[n.kind]+" / "+n.topic);
+row(dl,"阶段",n.pinned?"置顶":n.stage==="long"?"长期":"短期，复习 "+n.review_step+"/"+n.review_total);
+row(dl,"重要度",n.importance);row(dl,"情绪",n.valence);row(dl,"保留率",Math.round(n.retention*100)+"%");
+row(dl,"存入时间",fd(n.created));row(dl,"最近使用",fd(n.last_access));row(dl,"下次复习",fd(n.next_review));
+row(dl,"回忆次数",n.recalls);row(dl,"标签",n.tags.join("，")||"无");
+panel.appendChild(dl);
+var nb=DATA.edges.filter(function(e){return e.a===id||e.b===id}).sort(function(a,b){return b.w-a.w});
+var t=document.createElement("div");t.textContent="相连的记忆："+(nb.length?"":"无");t.style.color=css("--mut");panel.appendChild(t);
+nb.forEach(function(e){var oid=e.a===id?e.b:e.a,o=DATA.nodes.filter(function(x){return x.id===oid})[0];if(!o)return;
+var b=document.createElement("button");b.className="b nb";b.textContent=o.text+"（"+e.w.toFixed(2)+"）";b.onclick=function(){show(oid)};panel.appendChild(b)});
+panel.style.display="block";draw()}
+function hit(mx,my){for(var i=pts.length-1;i>=0;i--){var p=pts[i];if(Math.hypot(p.x-mx,p.y-my)<=p.r+6)return p.n.id}return null}
+var drag=null,moved=0;
+cv.addEventListener("pointerdown",function(e){drag={x:e.clientX,y:e.clientY};moved=0;cv.setPointerCapture(e.pointerId)});
+cv.addEventListener("pointermove",function(e){if(!drag)return;var dx=e.clientX-drag.x,dy=e.clientY-drag.y;moved+=Math.abs(dx)+Math.abs(dy);yaw+=dx*0.01;pitch=Math.max(-1.4,Math.min(1.4,pitch+dy*0.01));drag={x:e.clientX,y:e.clientY};draw()});
+cv.addEventListener("pointerup",function(e){drag=null;if(moved<6&&DATA){var r=cv.getBoundingClientRect(),id=hit(e.clientX-r.left,e.clientY-r.top);if(id)show(id);else{sel=null;panel.style.display="none";draw()}}});
+function zm(f){zoom=Math.max(0.4,Math.min(3,zoom*f));draw()}
+cv.addEventListener("wheel",function(e){e.preventDefault();zm(e.deltaY<0?1.1:0.9)},{passive:false});
+document.getElementById("zin").onclick=function(){zm(1.2)};document.getElementById("zout").onclick=function(){zm(1/1.2)};
+document.getElementById("q").oninput=draw;document.getElementById("topic").onchange=draw;
+var ks=document.getElementById("kinds");
+Object.keys(COL).forEach(function(k){var b=document.createElement("button");b.className="b k";var i=document.createElement("i");i.style.background=COL[k];b.appendChild(i);b.appendChild(document.createTextNode(KN[k]));b.onclick=function(){vis[k]=vis[k]?0:1;b.classList.toggle("off",!vis[k]);draw()};ks.appendChild(b)});
+document.getElementById("file").addEventListener("change",function(e){var f=e.target.files[0];if(!f)return;var fr=new FileReader();
+fr.onload=function(){try{var d=JSON.parse(fr.result);if(d.nodes&&d.edges&&d.topics)setData(d);else if(d.memories)setData(fromRaw(d));else alert("请选择 map.json 或 brain_memory.json")}catch(x){alert("文件无法解析")}};fr.readAsText(f)});
+window.addEventListener("resize",resize);
+if(window.matchMedia)window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change",draw);
+resize();
+</script>
+</body>
+</html>
